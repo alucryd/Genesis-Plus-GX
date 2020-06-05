@@ -49,6 +49,7 @@
 #if defined(SYSTEM_LIBCHDR)
 #include <libchdr/chd.h>
 #include <libchdr/cdrom.h>
+#define CD_TRACK_PADDING 4
 #elif defined(USE_LIBCHDR)
 #include "libchdr/src/chd.h"
 #include "libchdr/src/cdrom.h"
