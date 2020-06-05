@@ -46,7 +46,10 @@
 #include "tremor/ivorbisfile.h"
 #endif
 
-#if defined(USE_LIBCHDR)
+#if defined(SYSTEM_LIBCHDR)
+#include <libchdr/chd.h>
+#include <libchdr/cdrom.h>
+#elif defined(USE_LIBCHDR)
 #include "libchdr/src/chd.h"
 #include "libchdr/src/cdrom.h"
 #endif
