@@ -72,6 +72,10 @@
 
 #include <libretro.h>
 #include <streams/file_stream.h>
+#ifdef HAVE_ORE
+#include <strings.h>
+#include <smelt.h>
+#endif
 #include <file/file_path.h>
 #include <compat/strl.h>
 
@@ -356,6 +360,69 @@ static void show_rom_size_error_msg(void)
    }
 }
 
+#ifdef HAVE_ORE
+/* Read a cartridge ORE, oxyromon's ROM format, through libsmelt, with the
+   extension of its platform, which load_rom picks the hardware from. A
+   Mega CD ORE is cdd_load's. */
+static int load_ore(char *filename, unsigned char *buffer, int maxsize, char *extension)
+{
+  struct smelt_ingot *ingot = NULL;
+  uint64_t logical = 0;
+  char platform[32];
+  size_t platform_len = sizeof(platform);
+  const char *ext = NULL;
+
+  if (smelt_open(filename, NULL, &ingot) != SMELT_OK ||
+      smelt_logical_size(ingot, &logical) != SMELT_OK ||
+      smelt_platform(ingot, platform, &platform_len) != SMELT_OK)
+  {
+    log_cb(RETRO_LOG_ERROR, "ORE %s: %s\n", filename, smelt_last_error());
+    smelt_close(ingot);
+    return 0;
+  }
+
+  if (!strcmp(platform, "md"))
+    ext = ".md";
+  else if (!strcmp(platform, "sms"))
+    ext = "sms";
+  else if (!strcmp(platform, "gg"))
+    ext = ".gg";
+  else if (!strcmp(platform, "sg1000"))
+    ext = ".sg";
+  else
+  {
+    log_cb(RETRO_LOG_ERROR, "ORE %s is a %s ROM, which Genesis Plus GX does not run\n",
+           filename, platform[0] ? platform : "unknown");
+    smelt_close(ingot);
+    return 0;
+  }
+
+  if (logical == 0 || logical > MAXROMSIZE)
+  {
+    smelt_close(ingot);
+    show_rom_size_error_msg();
+    return 0;
+  }
+  else if (logical > (uint64_t)maxsize)
+    logical = maxsize;
+
+  log_cb(RETRO_LOG_INFO, "Loading %d bytes...\n", (int)logical);
+
+  if (smelt_read(ingot, 0, buffer, (size_t)logical) != SMELT_OK)
+  {
+    log_cb(RETRO_LOG_ERROR, "ORE %s: %s\n", filename, smelt_last_error());
+    smelt_close(ingot);
+    return 0;
+  }
+  smelt_close(ingot);
+
+  if (extension)
+    memcpy(extension, ext, 4);
+
+  return (int)logical;
+}
+#endif
+
 int load_archive(char *filename, unsigned char *buffer, int maxsize, char *extension)
 {
   int64_t left = 0;
@@ -368,6 +435,14 @@ int load_archive(char *filename, unsigned char *buffer, int maxsize, char *exten
     memcpy(extension, &filename[strlen(filename) - 3], 3);
     extension[3] = 0;
   }
+
+#ifdef HAVE_ORE
+  {
+    size_t len = strlen(filename);
+    if ((len >= 4) && !strcasecmp(&filename[len - 4], ".ore"))
+      return load_ore(filename, buffer, maxsize, extension);
+  }
+#endif
 
   /* Check if this was called to load ROM file from the frontend (not BOOT ROM or Lock-On ROM files from the core) */
   if (maxsize >= 0x800000)
@@ -3121,7 +3196,11 @@ void retro_get_system_info(struct retro_system_info *info)
 #define GIT_VERSION ""
 #endif
    info->library_version = "v1.7.4" GIT_VERSION;
+   #ifdef HAVE_ORE
+   info->valid_extensions = "m3u|mdx|md|smd|gen|bin|cue|iso|chd|bms|sms|gg|sg|68k|sgd|ore";
+#else
    info->valid_extensions = "m3u|mdx|md|smd|gen|bin|cue|iso|chd|bms|sms|gg|sg|68k|sgd";
+#endif
    info->block_extract = false;
    info->need_fullpath = true;
 }

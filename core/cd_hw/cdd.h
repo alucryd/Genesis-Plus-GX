@@ -46,6 +46,9 @@
 #include "tremor/ivorbisfile.h"
 #endif
 
+#ifdef HAVE_ORE
+#include <smelt.h>
+#endif
 #if defined(USE_LIBCHDR)
 #include "libchdr/src/chd.h"
 #include "libchdr/src/cdrom.h"
@@ -106,6 +109,17 @@ typedef struct
 } chd_t;
 #endif
 
+#ifdef HAVE_ORE
+/* ORE file, read through libsmelt as raw sectors by LBA */
+typedef struct
+{
+  struct smelt_ingot *ingot;
+  uint8 sector[SMELT_SECTOR];
+  int cached;
+  unsigned int pos;
+} ore_t;
+#endif
+
 /* CDD hardware */
 typedef struct
 {
@@ -122,6 +136,9 @@ typedef struct
   toc_t toc;
 #if defined(USE_LIBCHDR)
   chd_t chd;
+#endif
+#ifdef HAVE_ORE
+  ore_t ore;
 #endif
   int16 audio[2];
 } cdd_t; 

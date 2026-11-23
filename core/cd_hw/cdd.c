@@ -54,6 +54,26 @@ extern int8 audio_hard_disable;
 #define TYPE_MODE1 0x01
 #define TYPE_MODE2 0x02
 
+#ifdef HAVE_ORE
+static int is_ore(const char *filename)
+{
+  size_t len = strlen(filename);
+  return (len >= 4) && (!memcmp("ore", &filename[len - 3], 3) || !memcmp("ORE", &filename[len - 3], 3));
+}
+
+/* The raw sector at lba, cached: zeros for a pregap the dump leaves out */
+static uint8 *ore_sector(int lba)
+{
+  if (lba != cdd.ore.cached)
+  {
+    if ((lba < 0) || (smelt_read_sectors(cdd.ore.ingot, lba, 1, cdd.ore.sector) != SMELT_OK))
+      memset(cdd.ore.sector, 0, SMELT_SECTOR);
+    cdd.ore.cached = lba;
+  }
+  return cdd.ore.sector;
+}
+#endif
+
 /* BCD conversion lookup tables */
 static const uint8 lut_BCD_8[100] =
 {
@@ -256,6 +276,14 @@ int cdd_context_save(uint8 *state)
   if (cdd.toc.tracks[cdd.index].type == TYPE_AUDIO)
   {
     /* get file read offset */
+#ifdef HAVE_ORE
+    if (cdd.ore.ingot)
+    {
+      /* ORE byte offset */
+      offset = cdd.ore.pos;
+    }
+    else
+#endif
 #if defined(USE_LIBCHDR)
     if (cdd.chd.file)
     {
@@ -363,6 +391,14 @@ int cdd_context_load(uint8 *state, char *version)
 #endif
 #endif
       /* seek to current file read offset */
+#ifdef HAVE_ORE
+      if (cdd.ore.ingot)
+      {
+        /* ORE byte offset (aligned to 16-bit stereo samples) */
+        cdd.ore.pos = offset & 0xfffffffc;
+      }
+      else
+#endif
 #if defined(USE_LIBCHDR)
       if (cdd.chd.file)
       {
@@ -422,6 +458,92 @@ int cdd_load(char *filename, char *header)
     /* which should be handled by load_archive function */
     return (0);
   }
+
+#ifdef HAVE_ORE
+  if (is_ore(filename))
+  {
+    size_t count = 0;
+    struct smelt_track track;
+    struct smelt_open_opts opts = {0};
+#ifdef __LIBRETRO__
+    opts.precache = config.cd_precache ? 1 : 0;
+#endif
+
+    if ((smelt_open(filename, &opts, &cdd.ore.ingot) != SMELT_OK) ||
+        (smelt_track_count(cdd.ore.ingot, &count) != SMELT_OK))
+    {
+#ifdef __LIBRETRO__
+      log_cb(RETRO_LOG_ERROR, "ORE %s: %s\n", filename, smelt_last_error());
+#endif
+      smelt_close(cdd.ore.ingot);
+      cdd.ore.ingot = NULL;
+      cdStreamClose(fd);
+      return -1;
+    }
+
+    /* no CD: a cartridge ROM, which load_archive reads */
+    if (!count)
+    {
+      smelt_close(cdd.ore.ingot);
+      cdd.ore.ingot = NULL;
+      cdStreamClose(fd);
+      return 0;
+    }
+
+    /* tracks as the ORE gives them, LBAs from 00:02:00 as here */
+    for (cdd.toc.last = 0; (cdd.toc.last < (int)count) && (cdd.toc.last < 99); cdd.toc.last++)
+    {
+      if (smelt_track_at(cdd.ore.ingot, cdd.toc.last, &track) != SMELT_OK)
+        break;
+
+      if (cdd.toc.last)
+      {
+        /* CD-ROM track supported only for first track */
+        if (track.mode != SMELT_TRACK_AUDIO)
+          break;
+      }
+      else if (track.mode != SMELT_TRACK_AUDIO)
+      {
+        /* RAW data blocks */
+        cdd.sectorSize = 2352;
+        cdd.toc.tracks[0].type = (track.mode == SMELT_TRACK_MODE1) ? TYPE_MODE1 : TYPE_MODE2;
+      }
+
+      cdd.toc.tracks[cdd.toc.last].start = track.lba;
+      cdd.toc.tracks[cdd.toc.last].end = track.lba + track.sectors;
+      cdd.toc.end = cdd.toc.tracks[cdd.toc.last].end;
+
+      /* indicate valid track file */
+      cdd.toc.tracks[cdd.toc.last].fd = fd;
+    }
+
+    cdd.ore.cached = -1;
+
+    /* valid CD-ROM image ? */
+    if (cdd.sectorSize && cdd.toc.last && (cdd.toc.end <= (99*60*75)))
+    {
+      /* copy CD image header + security code (skip RAW sector 16-byte header) */
+      memcpy(header, ore_sector(0) + 16, 0x210);
+
+      /* Lead-out */
+      cdd.toc.tracks[cdd.toc.last].start = cdd.toc.end;
+
+      /* CD mounted */
+      cdd.loaded = HW_ADDON_MEGACD;
+      return 1;
+    }
+
+#ifdef __LIBRETRO__
+    log_cb(RETRO_LOG_ERROR, "ORE %s holds no Mega CD disc\n", filename);
+#endif
+    smelt_close(cdd.ore.ingot);
+    cdStreamClose(fd);
+    memset(&cdd.ore, 0x00, sizeof(cdd.ore));
+    memset(&cdd.toc, 0x00, sizeof(cdd.toc));
+    cdd.sectorSize = 0;
+    return -1;
+  }
+#endif
 
 #if defined(USE_LIBCHDR)
   if (!memcmp("chd", &filename[strlen(filename) - 3], 3) || !memcmp("CHD", &filename[strlen(filename) - 3], 3))
@@ -1340,6 +1462,9 @@ void cdd_unload(void)
   {
     int i;
 
+#ifdef HAVE_ORE
+    smelt_close(cdd.ore.ingot);
+#endif
 #if defined(USE_LIBCHDR)
     chd_close(cdd.chd.file);
     if (cdd.chd.hunk)
@@ -1384,6 +1509,11 @@ void cdd_unload(void)
   /* reset TOC */
   memset(&cdd.toc, 0x00, sizeof(cdd.toc));
 
+#ifdef HAVE_ORE
+  /* reset ORE data */
+  memset(&cdd.ore, 0x00, sizeof(cdd.ore));
+#endif
+
 #if defined(USE_LIBCHDR)
   /* reset CHD data */
   memset(&cdd.chd, 0x00, sizeof(cdd.chd));
@@ -1398,6 +1528,29 @@ void cdd_read_data(uint8 *dst, uint8 *subheader)
   /* only allow reading (first) CD-ROM track sectors */
   if (cdd.toc.tracks[cdd.index].type && (cdd.lba >= 0))
   {
+#ifdef HAVE_ORE
+    if (cdd.ore.ingot)
+    {
+      uint8 *sector = ore_sector(cdd.lba);
+
+      /* check if sub-header is required (Mode 2 sector only) */
+      if (!subheader)
+      {
+        /* read Mode 1 user data (2048 bytes), skipping block sync pattern (12 bytes) + block header (4 bytes)*/
+        memcpy(dst, sector + 12 + 4, 2048);
+      }
+      else
+      {
+        /* read Mode 2 sub-header (first 4 bytes), skipping block sync pattern (12 bytes) + block header (4 bytes)*/
+        memcpy(subheader, sector + 12 + 4, 4);
+
+        /* read Mode 2 user data (max 2328 bytes), skipping Mode 2 sub-header (8 bytes) */
+        memcpy(dst, sector + 12 + 4 + 8, 2328);
+      }
+
+      return;
+    }
+#endif
 #if defined(USE_LIBCHDR)
     if (cdd.chd.file)
     {
@@ -1494,6 +1647,14 @@ void cdd_seek_audio(int index, int lba)
 #endif
 
   /* seek to track position */
+#ifdef HAVE_ORE
+  if (cdd.ore.ingot)
+  {
+    /* ORE byte offset, from LBA 0 */
+    cdd.ore.pos = (lba > 0) ? (lba * SMELT_SECTOR) : 0;
+  }
+  else
+#endif
 #if defined(USE_LIBCHDR)
   if (cdd.chd.file)
   {
@@ -1567,6 +1728,54 @@ void cdd_read_audio(unsigned int samples)
     }
 
     /* read samples from current block */
+#ifdef HAVE_ORE
+    if (cdd.ore.ingot)
+    {
+      /* process 16-bit (little-endian) stereo samples */
+      for (i=0; i<samples; i++)
+      {
+        uint8 *ptr = ore_sector(cdd.ore.pos / SMELT_SECTOR) + (cdd.ore.pos % SMELT_SECTOR);
+
+        /* CD-DA fader multiplier (cf. LC7883 datasheet) */
+        /* (MIN) 0,1,2,3,4,8,12,16,20...,1020,1024 (MAX) */
+        mul = (curVol & 0x7fc) ? (curVol & 0x7fc) : (curVol & 0x03);
+
+        /* left & right channels */
+        l = (((int16)((ptr[0] + ptr[1]*256)) * mul) / 1024);
+        r = (((int16)((ptr[2] + ptr[3]*256)) * mul) / 1024);
+
+        /* CD-DA output mixing volume (0-100%) */
+        l = (l * config.cdda_volume) / 100;
+        r = (r * config.cdda_volume) / 100;
+
+        /* update blip buffer */
+        blip_add_delta_fast(snd.blips[2], i, l-prev_l, r-prev_r);
+        prev_l = l;
+        prev_r = r;
+
+        /* update ORE byte offset */
+        cdd.ore.pos += 4;
+
+        /* update CD-DA fader volume (one step/sample) */
+        if (curVol < endVol)
+        {
+          /* fade-in */
+          curVol++;
+        }
+        else if (curVol > endVol)
+        {
+          /* fade-out */
+          curVol--;
+        }
+        else if (!curVol)
+        {
+          /* audio will remain muted until next setup */
+          break;
+        }
+      }
+    }
+    else
+#endif
 #if defined(USE_LIBCHDR)
     if (cdd.chd.file)
     {
